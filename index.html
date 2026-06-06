@@ -41,7 +41,7 @@
       border-radius: 30px;
       margin-bottom: 22px;
       background: #222222;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
     }
 
     .station {
@@ -77,10 +77,6 @@
       margin-bottom: 24px;
     }
 
-    .play:active {
-      transform: scale(0.98);
-    }
-
     .volume-label {
       font-size: 13px;
       opacity: 0.75;
@@ -95,7 +91,7 @@
     .status {
       margin-top: 18px;
       font-size: 13px;
-      opacity: 0.7;
+      opacity: 0.75;
     }
 
     .footer {
@@ -125,46 +121,147 @@
 
     <div class="footer">Live Blues, Blues-Rock and more</div>
 
-    <audio id="radioAudio" preload="none">
-      <source src="https://securestreams.autopo.st:2635/;" type="audio/mpeg">
-    </audio>
+    <audio id="radioAudio" preload="none"></audio>
   </main>
 
   <script>
-    const audio = document.getElementById("radioAudio");
-    const playButton = document.getElementById("playButton");
-    const volumeControl = document.getElementById("volumeControl");
-    const statusText = document.getElementById("status");
-    const songTitle = document.getElementById("songTitle");
-    const artistName = document.getElementById("artistName");
-    const albumCover = document.getElementById("albumCover");
+    var STREAM_URL = "https://securestreams.autopo.st:2635/;";
+    var STATS_URL = "https://securestreams.autopo.st:2635/statistics?json=1";
 
-    const defaultCover = "icon-512.png";
-    let lastTrack = "";
+    var audio = document.getElementById("radioAudio");
+    var playButton = document.getElementById("playButton");
+    var volumeControl = document.getElementById("volumeControl");
+    var statusText = document.getElementById("status");
+    var songTitle = document.getElementById("songTitle");
+    var artistName = document.getElementById("artistName");
+    var albumCover = document.getElementById("albumCover");
 
+    var defaultCover = "icon-512.png";
+    var lastTrack = "";
+    var userWantsToPlay = false;
+    var reconnectTimer = null;
+    var reconnectAttempts = 0;
+    var maxReconnectAttempts = 10;
+
+    audio.src = STREAM_URL;
     audio.volume = volumeControl.value;
 
-    playButton.addEventListener("click", async () => {
-      if (audio.paused) {
-        try {
-          statusText.textContent = "Connecting...";
-          await audio.play();
-          playButton.textContent = "⏸ Pause";
-          statusText.textContent = "Playing";
-        } catch (error) {
-          statusText.textContent = "Playback blocked or stream unavailable";
-          playButton.textContent = "▶ Play";
-          console.error("Playback error:", error);
-        }
-      } else {
-        audio.pause();
+    function setStatus(message) {
+      statusText.textContent = message;
+    }
+
+    function resetAudioSource() {
+      audio.pause();
+      audio.src = STREAM_URL + "?nocache=" + new Date().getTime();
+      audio.load();
+    }
+
+    function startPlayback() {
+      userWantsToPlay = true;
+      setStatus("Connecting...");
+
+      audio.play().then(function () {
+        playButton.textContent = "⏸ Pause";
+        setStatus("Playing");
+        reconnectAttempts = 0;
+      }).catch(function (error) {
+        setStatus("Playback blocked or stream unavailable");
         playButton.textContent = "▶ Play";
-        statusText.textContent = "Paused";
+        console.log("Playback error:", error);
+      });
+    }
+
+    function stopPlayback() {
+      userWantsToPlay = false;
+      audio.pause();
+      playButton.textContent = "▶ Play";
+      setStatus("Paused");
+
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+    }
+
+    function scheduleReconnect(reason) {
+      if (!userWantsToPlay) {
+        return;
+      }
+
+      if (reconnectTimer) {
+        return;
+      }
+
+      if (reconnectAttempts >= maxReconnectAttempts) {
+        setStatus("Stream interrupted. Tap Play to reconnect.");
+        playButton.textContent = "▶ Play";
+        userWantsToPlay = false;
+        return;
+      }
+
+      reconnectAttempts = reconnectAttempts + 1;
+      setStatus("Reconnecting... attempt " + reconnectAttempts);
+
+      reconnectTimer = setTimeout(function () {
+        reconnectTimer = null;
+        resetAudioSource();
+
+        audio.play().then(function () {
+          playButton.textContent = "⏸ Pause";
+          setStatus("Playing");
+          reconnectAttempts = 0;
+        }).catch(function (error) {
+          console.log("Reconnect failed:", reason, error);
+          scheduleReconnect("retry");
+        });
+      }, 3000);
+    }
+
+    playButton.addEventListener("click", function () {
+      if (audio.paused) {
+        startPlayback();
+      } else {
+        stopPlayback();
       }
     });
 
-    volumeControl.addEventListener("input", () => {
+    volumeControl.addEventListener("input", function () {
       audio.volume = volumeControl.value;
+    });
+
+    audio.addEventListener("playing", function () {
+      setStatus("Playing");
+      reconnectAttempts = 0;
+    });
+
+    audio.addEventListener("waiting", function () {
+      if (userWantsToPlay) {
+        setStatus("Buffering...");
+      }
+    });
+
+    audio.addEventListener("stalled", function () {
+      scheduleReconnect("stalled");
+    });
+
+    audio.addEventListener("error", function () {
+      scheduleReconnect("error");
+    });
+
+    audio.addEventListener("ended", function () {
+      scheduleReconnect("ended");
+    });
+
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden && userWantsToPlay && audio.paused) {
+        scheduleReconnect("visibilitychange");
+      }
+    });
+
+    window.addEventListener("online", function () {
+      if (userWantsToPlay && audio.paused) {
+        scheduleReconnect("online");
+      }
     });
 
     function splitArtistTitle(rawTitle) {
@@ -175,11 +272,14 @@
         };
       }
 
-      const separators = [" - ", " – ", " — "];
+      var separators = [" - ", " – ", " — "];
 
-      for (const separator of separators) {
-        if (rawTitle.includes(separator)) {
-          const parts = rawTitle.split(separator);
+      for (var i = 0; i < separators.length; i++) {
+        var separator = separators[i];
+
+        if (rawTitle.indexOf(separator) !== -1) {
+          var parts = rawTitle.split(separator);
+
           return {
             artist: parts[0].trim(),
             title: parts.slice(1).join(separator).trim()
@@ -193,36 +293,34 @@
       };
     }
 
-    async function updateAlbumCover(artist, title) {
-      try {
-        if (!artist || !title || artist === "Sunset Blues Radio" || title === "Live Stream") {
-          albumCover.src = defaultCover;
-          return;
-        }
+    function updateAlbumCover(artist, title) {
+      if (!artist || !title || artist === "Sunset Blues Radio" || title === "Live Stream") {
+        albumCover.src = defaultCover;
+        return;
+      }
 
-        const query = encodeURIComponent(`${artist} ${title}`);
-        const url = `https://itunes.apple.com/search?term=${query}&media=music&entity=song&limit=1`;
+      var query = encodeURIComponent(artist + " " + title);
+      var url = "https://itunes.apple.com/search?term=" + query + "&media=music&entity=song&limit=1";
 
-        const response = await fetch(url);
-        const data = await response.json();
-
+      fetch(url).then(function (response) {
+        return response.json();
+      }).then(function (data) {
         if (data.resultCount > 0 && data.results[0].artworkUrl100) {
-          const artwork = data.results[0].artworkUrl100.replace("100x100bb", "512x512bb");
+          var artwork = data.results[0].artworkUrl100.replace("100x100bb", "512x512bb");
           albumCover.src = artwork;
         } else {
           albumCover.src = defaultCover;
         }
-      } catch (error) {
+      }).catch(function () {
         albumCover.src = defaultCover;
-      }
+      });
     }
 
-    async function updateNowPlaying() {
-      try {
-        const response = await fetch("https://securestreams.autopo.st:2635/statistics?json=1");
-        const data = await response.json();
-
-        let rawTitle = "";
+    function updateNowPlaying() {
+      fetch(STATS_URL).then(function (response) {
+        return response.json();
+      }).then(function (data) {
+        var rawTitle = "";
 
         if (data.streams && data.streams.length > 0) {
           rawTitle = data.streams[0].songtitle || "";
@@ -230,8 +328,8 @@
           rawTitle = data.songtitle;
         }
 
-        const track = splitArtistTitle(rawTitle);
-        const currentTrack = `${track.artist} - ${track.title}`;
+        var track = splitArtistTitle(rawTitle);
+        var currentTrack = track.artist + " - " + track.title;
 
         songTitle.textContent = track.title;
         artistName.textContent = track.artist;
@@ -240,12 +338,10 @@
           lastTrack = currentTrack;
           updateAlbumCover(track.artist, track.title);
         }
-
-      } catch (error) {
+      }).catch(function () {
         songTitle.textContent = "Live Stream";
         artistName.textContent = "Sunset Blues Radio";
-        albumCover.src = defaultCover;
-      }
+      });
     }
 
     updateNowPlaying();
